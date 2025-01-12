@@ -4,6 +4,7 @@
 #pragma kernel InitializeFragment
 #pragma kernel InitializeSubFragment
 #pragma kernel FillSegmentSet
+#pragma kernel GenerateVertexData
 
 RWTexture2D<float4> _SourceTexture;
 RWTexture2D<float4> _ConnectedComponentMap;
@@ -14,8 +15,8 @@ uint _Height;
 
 int _BoundingOffsetx;
 int _BoundingOffsety;
-int _BoundingWidth;
-int _BoundingHeight;
+uint _BoundingWidth;
+uint _BoundingHeight;
 
 RWStructuredBuffer<int> _FloodFlag;
 
@@ -27,6 +28,14 @@ float4 _FragmentIndex;
 
 RWStructuredBuffer<int4> _ConnectedSegmentSet;
 RWStructuredBuffer<int> _ConnectedSegmentIndex;
+
+uint _IndexOffset;
+uint _TotalSegments;
+float4 _ProjectionFactor;
+float _CastDistance;
+
+RWStructuredBuffer<float3> _VerticesBuffer;
+RWStructuredBuffer<int> _IndicesBuffer;
 
 [numthreads(8,8,1)]
 void Initialize(uint3 id : SV_DispatchThreadID)
@@ -138,7 +147,7 @@ void InitializeFragment(uint3 id : SV_DispatchThreadID)
     }
 
     int2 signedCoord = int2(id.x + _BoundingOffsetx, id.y + _BoundingOffsety);
-    if (signedCoord.x < 0 || signedCoord.x >= _Width || signedCoord.y < 0 || signedCoord.y >= _Height)
+    if (signedCoord.x < 0 || signedCoord.x >= int(_Width) || signedCoord.y < 0 || signedCoord.y >= int(_Height))
     {
         _ConnectedComponentFragment[id.xy] = float4(float(id.x) / _BoundingWidth, float(id.y) / _BoundingHeight, 1.0, 1.0);
         return;
@@ -169,7 +178,7 @@ void InitializeSubFragment(uint3 id : SV_DispatchThreadID)
     }
 
     int2 signedCoord = int2(id.x + _BoundingOffsetx, id.y + _BoundingOffsety);
-    if (signedCoord.x < 0 || signedCoord.x >= _Width || signedCoord.y < 0 || signedCoord.y >= _Height)
+    if (signedCoord.x < 0 || signedCoord.x >= int(_Width) || signedCoord.y < 0 || signedCoord.y >= int(_Height))
     {
         _ConnectedComponentFragment[id.xy] = float4(1.0, 1.0, 1.0, 1.0);
         return;
@@ -354,4 +363,38 @@ void FillSegmentSet(uint3 id : SV_DispatchThreadID)
 
     int caseIndex = rightValue + (bottomValue << 1) + (leftValue << 2) + (topValue << 3);
     HandleSegment(int2(id.xy), caseIndex);
+}
+
+[numthreads(8,8,1)]
+void GenerateVertexData(uint3 id : SV_DispatchThreadID)
+{
+    uint sourceIndex = id.x * 8 + id.y;
+    if (sourceIndex >= _TotalSegments)
+    {
+        return;
+    }
+
+    int verticeIndexStart = 2 * (sourceIndex + _IndexOffset);
+    int4 segment = _ConnectedSegmentSet[sourceIndex];
+
+    int2 startCoord = int2(segment.x, segment.y) + int2(_BoundingOffsetx, _BoundingOffsety);
+    float3 nearPlanePoint = float3(float(startCoord.x) * _ProjectionFactor.x, float(startCoord.y) * _ProjectionFactor.y, 0.0);
+    float3 farPlanePoint = float3(float(startCoord.x) * _ProjectionFactor.z, float(startCoord.y) * _ProjectionFactor.w, _CastDistance);
+
+    _VerticesBuffer[verticeIndexStart] = nearPlanePoint;
+    _VerticesBuffer[verticeIndexStart + 1] = farPlanePoint;
+
+    int currIndexStart = sourceIndex * 2;
+    int nextIndexStart = sourceIndex * 2 + 2;
+    if (sourceIndex == _TotalSegments - 1) nextIndexStart = 0;
+    currIndexStart += _IndexOffset * 2;
+    nextIndexStart += _IndexOffset * 2;
+
+    int indiceIndexStart = 6 * (sourceIndex + _IndexOffset);
+    _IndicesBuffer[indiceIndexStart] = nextIndexStart;
+    _IndicesBuffer[indiceIndexStart + 1] = currIndexStart + 1;
+    _IndicesBuffer[indiceIndexStart + 2] = currIndexStart;
+    _IndicesBuffer[indiceIndexStart + 3] = nextIndexStart + 1;
+    _IndicesBuffer[indiceIndexStart + 4] = currIndexStart + 1;
+    _IndicesBuffer[indiceIndexStart + 5] = nextIndexStart;
 }

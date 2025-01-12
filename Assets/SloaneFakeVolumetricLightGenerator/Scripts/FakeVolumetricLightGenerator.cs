@@ -52,6 +52,7 @@ namespace Sloane.FakeVolumetricLightGenerator
         struct ConnectedSegmentSet
         {
             public BoundsInt BoundingBox;
+            public float AreaSize;
             public List<ConnectedSegment> Segments;
         }
         const int BOUNDING_BOX_EXTEND = 8;
@@ -73,6 +74,8 @@ namespace Sloane.FakeVolumetricLightGenerator
         [SerializeField]
         int m_CastResolution = 512;
         [SerializeField]
+        bool m_GenerateVertexDataWithComputeShader = false;
+        [SerializeField]
         Mesh m_Mesh;
         [SerializeField, HideInInspector]
         UniversalRenderPipelineAsset m_RenderPipelineAsset;
@@ -80,13 +83,19 @@ namespace Sloane.FakeVolumetricLightGenerator
         ComputeShader m_ConnectedComponentMapComputeShader;
         [SerializeField]
         List<ConnectedSegmentSet> m_OutputConnectedSegmentSets = new List<ConnectedSegmentSet>();
-        [SerializeField, Range(0.0f, 1.0f)]
+        [SerializeField, Range(0.0f, 1.0f),]
         float m_Tolerance = 0.2f;
 
         [SerializeField, HideInInspector]
         List<Vector3> m_Vertices = new List<Vector3>();
         [SerializeField, HideInInspector]
         List<int> m_Indices = new List<int>();
+        [SerializeField, HideInInspector]
+        List<Vector4> m_UVs = new List<Vector4>();
+        [SerializeField, HideInInspector]
+        List<Vector3> m_Normals = new List<Vector3>();
+        [SerializeField, HideInInspector]
+        List<Color> m_Colors = new List<Color>();
 
         MeshFilter m_MeshFilter;
         MeshRenderer m_MeshRenderer;
@@ -262,7 +271,8 @@ namespace Sloane.FakeVolumetricLightGenerator
             CleanUpMesh();
             GenerateConnectedComponentMap();
             CleanUpConnectedSegmentSet(m_Tolerance);
-            GenerateVertexData();
+            if (m_GenerateVertexDataWithComputeShader) GenerateVertexDataWithComputeShader();
+            else GenerateVertexData();
 
             if (m_Mesh == null)
             {
@@ -271,7 +281,10 @@ namespace Sloane.FakeVolumetricLightGenerator
 
             m_Mesh.name = "FakeVolumetricLightMesh";
             m_Mesh.SetVertices(m_Vertices);
-            m_Mesh.SetIndices(m_Indices, MeshTopology.Triangles, 0);
+            m_Mesh.SetUVs(0, m_UVs);
+            m_Mesh.SetNormals(m_Normals);
+            m_Mesh.SetColors(m_Colors);
+            m_Mesh.SetIndices(m_Indices, MeshTopology.Quads, 0);
 
             m_MeshFilter.mesh = m_Mesh;
 
@@ -347,7 +360,7 @@ namespace Sloane.FakeVolumetricLightGenerator
                     continue;
                 }
 
-                Debug.Log($"{kv.Key} -> {kv.Value}");
+                // Debug.Log($"{kv.Key} -> {kv.Value}");
                 BoundsInt boundingBox = kv.Value;
                 boundingBox.xMin = boundingBox.xMin - BOUNDING_BOX_EXTEND;
                 boundingBox.yMin = boundingBox.yMin - BOUNDING_BOX_EXTEND;
@@ -532,14 +545,16 @@ namespace Sloane.FakeVolumetricLightGenerator
         {
             for (int i = 0; i < m_OutputConnectedSegmentSets.Count; i++)
             {
-                CleanUpConnectedSegmentSet(m_OutputConnectedSegmentSets[i], tolerance * m_CastResolution / 5);
+                var set = m_OutputConnectedSegmentSets[i];
+                CleanUpConnectedSegmentSet(ref set, tolerance * m_CastResolution / 5);
+                m_OutputConnectedSegmentSets[i] = set;
             }
         }
 
-        void CleanUpConnectedSegmentSet(ConnectedSegmentSet set, float tolerance)
+        void CleanUpConnectedSegmentSet(ref ConnectedSegmentSet set, float tolerance)
         {
-            if(set.Segments.Count == 0) return;
-            
+            if (set.Segments.Count == 0) return;
+
             List<int> pointIndexsToKeep = ListPool<int>.Get();
             pointIndexsToKeep.Clear();
 
@@ -567,6 +582,18 @@ namespace Sloane.FakeVolumetricLightGenerator
             }
             /* set.Segments.Add(new ConnectedSegment { Start = points[pointIndexsToKeep[pointIndexsToKeep.Count - 1]], End = points[pointIndexsToKeep[0]] }); */
 
+            float ComputePolygonArea(List<ConnectedSegment> segments)
+            {
+                int pointNum = segments.Count;
+                if (pointNum < 3) return 0.0f;
+                float s = segments[0].Start.y * (segments[pointNum - 1].End.x - segments[1].End.x);
+                for (int i = 1; i < pointNum; ++i)
+                    s += segments[i].Start.y * (segments[i - 1].End.x - segments[(i + 1) % pointNum].End.x);
+                
+                return Mathf.Abs(s / 2.0f);
+            }
+
+            set.AreaSize = Mathf.Sqrt(ComputePolygonArea(set.Segments)) * Mathf.Min(m_NearPlane.x, m_NearPlane.y) / m_CastResolution;
 
             ListPool<int>.Release(pointIndexsToKeep);
             ListPool<Vector2Int>.Release(points);
@@ -610,9 +637,87 @@ namespace Sloane.FakeVolumetricLightGenerator
             return distance;
         }
 
+        void GenerateVertexDataWithComputeShader()
+        {
+            System.Diagnostics.Stopwatch stopwatch = new System.Diagnostics.Stopwatch();
+            stopwatch.Start();
+
+            int totalSegments = 0;
+            for (int i = 0; i < m_OutputConnectedSegmentSets.Count; i++)
+            {
+                totalSegments += m_OutputConnectedSegmentSets[i].Segments.Count;
+            }
+
+            m_Vertices.Clear();
+            m_Indices.Clear();
+
+            Vector2Int center = new Vector2Int(SourceWidth / 2, SourceHeight / 2);
+            int indexOffset = 0;
+            int kernelHandle = m_ConnectedComponentMapComputeShader.FindKernel("GenerateVertexData");
+            ComputeBuffer segmentBuffer = new ComputeBuffer(totalSegments, sizeof(int) * 4);
+            ComputeBuffer verticesBuffer = new ComputeBuffer(totalSegments * 2, sizeof(float) * 3);
+            ComputeBuffer indicesBuffer = new ComputeBuffer(totalSegments * 6, sizeof(int));
+
+            m_ConnectedComponentMapComputeShader.SetBuffer(kernelHandle, "_VerticesBuffer", verticesBuffer);
+            m_ConnectedComponentMapComputeShader.SetBuffer(kernelHandle, "_IndicesBuffer", indicesBuffer);
+
+            var projectionFactor = new Vector4(m_NearPlane.x / SourceWidth, m_NearPlane.y / SourceHeight, m_FarPlane.x / SourceWidth, m_FarPlane.y / SourceHeight);
+            m_ConnectedComponentMapComputeShader.SetVector("_ProjectionFactor", projectionFactor);
+            m_ConnectedComponentMapComputeShader.SetFloat("_CastDistance", m_CastDistance);
+
+            for (int i = 0; i < m_OutputConnectedSegmentSets.Count; i++)
+            {
+                var connectedSegmentSet = m_OutputConnectedSegmentSets[i];
+                if (connectedSegmentSet.Segments.Count == 0) continue;
+
+                segmentBuffer.SetData(connectedSegmentSet.Segments, 0, 0, connectedSegmentSet.Segments.Count);
+                m_ConnectedComponentMapComputeShader.SetBuffer(kernelHandle, "_ConnectedSegmentSet", segmentBuffer);
+
+                m_ConnectedComponentMapComputeShader.SetInt("_IndexOffset", indexOffset);
+
+                m_ConnectedComponentMapComputeShader.SetInt("_BoundingOffsetx", connectedSegmentSet.BoundingBox.xMin - center.x);
+                m_ConnectedComponentMapComputeShader.SetInt("_BoundingOffsety", connectedSegmentSet.BoundingBox.yMin - center.y);
+
+                m_ConnectedComponentMapComputeShader.SetInt("_TotalSegments", connectedSegmentSet.Segments.Count);
+
+                m_ConnectedComponentMapComputeShader.Dispatch(kernelHandle, Mathf.CeilToInt(connectedSegmentSet.Segments.Count / 64.0f), 1, 1);
+                indexOffset += connectedSegmentSet.Segments.Count;
+            }
+
+            var verticesData = ArrayPool<Vector3>.Shared.Rent(totalSegments * 2);
+            var indicesData = ArrayPool<int>.Shared.Rent(totalSegments * 6);
+
+            verticesBuffer.GetData(verticesData, 0, 0, totalSegments * 2);
+            indicesBuffer.GetData(indicesData, 0, 0, totalSegments * 6);
+
+            for (int i = 0; i < totalSegments; i++)
+            {
+                for (int j = 0; j < 2; j++)
+                {
+                    m_Vertices.Add(verticesData[i * 2 + j]);
+                }
+
+                for (int j = 0; j < 6; j++)
+                {
+                    m_Indices.Add(indicesData[i * 6 + j]);
+                }
+            }
+
+            ArrayPool<Vector3>.Shared.Return(verticesData);
+            ArrayPool<int>.Shared.Return(indicesData);
+            verticesBuffer.Release();
+            indicesBuffer.Release();
+
+            stopwatch.Stop();
+            Debug.Log($"[Sloane | FakeVolumetricLightGenerator] Generate vertex data in {stopwatch.Elapsed.TotalMilliseconds} ms");
+        }
+
 
         void GenerateVertexData()
         {
+            System.Diagnostics.Stopwatch stopwatch = new System.Diagnostics.Stopwatch();
+            stopwatch.Start();
+
             int totalVetices = 0;
             for (int i = 0; i < m_OutputConnectedSegmentSets.Count; i++)
             {
@@ -621,6 +726,9 @@ namespace Sloane.FakeVolumetricLightGenerator
 
             m_Vertices.Clear();
             m_Indices.Clear();
+            m_UVs.Clear();
+            m_Normals.Clear();
+            m_Colors.Clear();
 
             Vector2Int center = new Vector2Int(SourceWidth / 2, SourceHeight / 2);
             int indexOffset = 0;
@@ -630,10 +738,9 @@ namespace Sloane.FakeVolumetricLightGenerator
                 for (int j = 0; j < connectedSegmentSet.Segments.Count; j++)
                 {
                     var segment = connectedSegmentSet.Segments[j];
-                    Vector2Int startCoord = new Vector2Int(segment.Start.x + connectedSegmentSet.BoundingBox.xMin, segment.Start.y + connectedSegmentSet.BoundingBox.yMin) - center;
-
-                    m_Vertices.Add(new Vector3(startCoord.x * m_NearPlane.x / SourceWidth, startCoord.y * m_NearPlane.y / SourceHeight, 0));
-                    m_Vertices.Add(new Vector3(startCoord.x * m_FarPlane.x / SourceWidth, startCoord.y * m_FarPlane.y / SourceHeight, m_CastDistance));
+                    var prevSegment = connectedSegmentSet.Segments[(j - 1 + connectedSegmentSet.Segments.Count) % connectedSegmentSet.Segments.Count];
+                    Vector2Int offset = new Vector2Int(connectedSegmentSet.BoundingBox.xMin, connectedSegmentSet.BoundingBox.yMin) - center;
+                    Vector2Int startCoord = new Vector2Int(segment.Start.x + offset.x, segment.Start.y + offset.y);
 
                     int currIndexStart = j * 2;
                     int nextIndexStart = j * 2 + 2;
@@ -654,11 +761,30 @@ namespace Sloane.FakeVolumetricLightGenerator
                     m_Indices.Add(nextIndexStart + 1);
                     m_Indices.Add(currIndexStart + 1);
                     m_Indices.Add(nextIndexStart);
+
+                    Vector3 currVertex = new Vector3(startCoord.x, startCoord.y, 0);
+                    Vector3 nextVertex = new Vector3(segment.End.x + offset.x, segment.End.y + offset.y, 0);
+                    Vector3 prevVertex = new Vector3(prevSegment.Start.x + offset.x, prevSegment.Start.y + offset.y, 0);
+
+                    Vector3 normal = ((currVertex - prevVertex) + (nextVertex - currVertex)).normalized;
+                    Vector4 uv0 = new Vector4((float)startCoord.x / SourceWidth, (float)startCoord.y / SourceHeight, 1, 0.5f);
+                    Vector4 uv1 = new Vector4(uv0.x * m_FarPlaneScale, uv0.y * m_FarPlaneScale, m_FarPlaneScale, 0.5f);
+
+                    m_Vertices.Add(new Vector3(startCoord.x * m_NearPlane.x / SourceWidth, startCoord.y * m_NearPlane.y / SourceHeight, 0));
+                    m_Vertices.Add(new Vector3(startCoord.x * m_FarPlane.x / SourceWidth, startCoord.y * m_FarPlane.y / SourceHeight, m_CastDistance));
+                    m_Normals.Add(normal);
+                    m_Normals.Add(normal);
+                    m_UVs.Add(uv0);
+                    m_UVs.Add(uv1);
+                    m_Colors.Add(new Color(0.0f, connectedSegmentSet.AreaSize, 0.0f, 1.0f));
+                    m_Colors.Add(new Color(1.0f, connectedSegmentSet.AreaSize, 0.0f, 1.0f));
                 }
 
                 indexOffset = m_Vertices.Count;
             }
 
+            stopwatch.Stop();
+            Debug.Log($"[Sloane | FakeVolumetricLightGenerator] Generate vertex data in {stopwatch.Elapsed.TotalMilliseconds} ms");
         }
 
         void GetUniqueColorInRenderTexture(RenderTexture renderTexture, Dictionary<Vector4, BoundsInt> boundingSet)
