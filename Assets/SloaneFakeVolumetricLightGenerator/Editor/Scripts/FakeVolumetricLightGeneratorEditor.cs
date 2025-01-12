@@ -11,7 +11,7 @@ namespace Sloane.FakeVolumetricLightGenerator.Editor
             DrawDefaultInspector();
 
             FakeVolumetricLightGenerator generator = (FakeVolumetricLightGenerator)target;
-            if (GUILayout.Button("Initialize Generator"))
+            if (GUILayout.Button("Generate"))
             {
                 generator.Generate();
             }

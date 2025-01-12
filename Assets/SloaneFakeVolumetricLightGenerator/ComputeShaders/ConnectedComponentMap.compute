@@ -1,0 +1,357 @@
+#pragma kernel Initialize
+#pragma kernel FloodFill
+#pragma kernel CountConnectedComponent
+#pragma kernel InitializeFragment
+#pragma kernel InitializeSubFragment
+#pragma kernel FillSegmentSet
+
+RWTexture2D<float4> _SourceTexture;
+RWTexture2D<float4> _ConnectedComponentMap;
+RWTexture2D<float4> _PrevConnectedComponentMap;
+
+uint _Width;
+uint _Height;
+
+int _BoundingOffsetx;
+int _BoundingOffsety;
+int _BoundingWidth;
+int _BoundingHeight;
+
+RWStructuredBuffer<int> _FloodFlag;
+
+RWStructuredBuffer<float4> _ConnectedComponentSet;
+RWStructuredBuffer<int> _ConnectedComponentIndex;
+
+RWTexture2D<float4> _ConnectedComponentFragment;
+float4 _FragmentIndex;
+
+RWStructuredBuffer<int4> _ConnectedSegmentSet;
+RWStructuredBuffer<int> _ConnectedSegmentIndex;
+
+[numthreads(8,8,1)]
+void Initialize(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Width || id.y >= _Height)
+    {
+        return;
+    }
+
+    float4 sourcePixel = _SourceTexture[id.xy];
+    float4 connectedComponent = float4(0.0, 0.0, 0.0, 1.0);
+
+    if (sourcePixel.r <= 0.0)
+    {
+        connectedComponent = float4(float(id.x) / _Width, float(id.y) / _Height, 1.0, 1.0);
+    }
+
+    _ConnectedComponentMap[id.xy] = connectedComponent;
+}
+
+void CompareAndFlood(inout float4 center, float4 reference)
+{
+    if (reference.b > 0.0)
+    {
+        if (center.x > reference.x)
+        {
+            center.x = reference.x;
+            center.y = reference.y;
+            InterlockedAdd(_FloodFlag[0], 1);
+        }
+        else if (center.x == reference.x && center.y > reference.y)
+        {
+            center.x = reference.x;
+            center.y = reference.y;
+            InterlockedAdd(_FloodFlag[0], 1);
+        }
+    }
+}
+
+[numthreads(8,8,1)]
+void FloodFill(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Width || id.y >= _Height)
+    {
+        return;
+    }
+
+    float4 centerPixel = _PrevConnectedComponentMap[id.xy];
+
+    if(centerPixel.b == 0.0)
+    {
+        return;
+    }
+
+    float4 leftPixel = (id.x > 0) ? _PrevConnectedComponentMap[id.xy - uint2(1.0, 0.0)] : float4(0.0, 0.0, 0.0, 1.0);
+    float4 rightPixel = (id.x < _Width - 1) ? _PrevConnectedComponentMap[id.xy + uint2(1.0, 0.0)] : float4(0.0, 0.0, 0.0, 1.0);
+    float4 topPixel = (id.y > 0) ? _PrevConnectedComponentMap[id.xy - uint2(0.0, 1.0)] : float4(0.0, 0.0, 0.0, 1.0);
+    float4 bottomPixel = (id.y < _Height - 1) ? _PrevConnectedComponentMap[id.xy + uint2(0.0, 1.0)] : float4(0.0, 0.0, 0.0, 1.0);
+
+    CompareAndFlood(centerPixel, leftPixel);
+    CompareAndFlood(centerPixel, rightPixel);
+    CompareAndFlood(centerPixel, topPixel);
+    CompareAndFlood(centerPixel, bottomPixel);
+
+    _ConnectedComponentMap[id.xy] = centerPixel;
+}
+
+[numthreads(8,8,1)]
+void CountConnectedComponent(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Width || id.y >= _Height)
+    {
+        return;
+    }
+
+    float4 connectedComponent = _ConnectedComponentMap[id.xy];
+
+    if (connectedComponent.b == 0.0)
+    {
+        return;
+    }
+
+    int lockValue = 0;
+    InterlockedCompareExchange(_ConnectedComponentIndex[1], 1, 0, lockValue);
+
+    for (int i = 0; i < _ConnectedComponentIndex[0]; i++)
+    {
+        float4 reference = _ConnectedComponentSet[i];
+
+        if (reference.x == connectedComponent.x && reference.y == connectedComponent.y)
+        {
+            return;
+        }
+    }
+
+    int index = 0;
+    InterlockedAdd(_ConnectedComponentIndex[0], 1, index);
+    _ConnectedComponentSet[index] = connectedComponent;
+
+    InterlockedExchange(_ConnectedComponentIndex[1], 0, lockValue);
+}
+
+[numthreads(8,8,1)]
+void InitializeFragment(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _BoundingWidth || id.y >= _BoundingHeight)
+    {
+        return;
+    }
+
+    int2 signedCoord = int2(id.x + _BoundingOffsetx, id.y + _BoundingOffsety);
+    if (signedCoord.x < 0 || signedCoord.x >= _Width || signedCoord.y < 0 || signedCoord.y >= _Height)
+    {
+        _ConnectedComponentFragment[id.xy] = float4(float(id.x) / _BoundingWidth, float(id.y) / _BoundingHeight, 1.0, 1.0);
+        return;
+    }
+
+    uint2 coord = uint2(signedCoord);
+    float4 color = _ConnectedComponentMap[coord];
+    float4 outputColor;
+
+    if(color.r == _FragmentIndex.r && color.g == _FragmentIndex.g)
+    {
+        outputColor = float4(0.0, 0.0, 0.0, 1.0);
+    }
+    else
+    {
+        outputColor = float4(float(id.x) / _BoundingWidth, float(id.y) / _BoundingHeight, 1.0, 1.0);
+    }
+
+    _ConnectedComponentFragment[id.xy] = outputColor;
+}
+
+[numthreads(8,8,1)]
+void InitializeSubFragment(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _BoundingWidth || id.y >= _BoundingHeight)
+    {
+        return;
+    }
+
+    int2 signedCoord = int2(id.x + _BoundingOffsetx, id.y + _BoundingOffsety);
+    if (signedCoord.x < 0 || signedCoord.x >= _Width || signedCoord.y < 0 || signedCoord.y >= _Height)
+    {
+        _ConnectedComponentFragment[id.xy] = float4(1.0, 1.0, 1.0, 1.0);
+        return;
+    }
+
+    uint2 coord = uint2(signedCoord);
+    float4 color = _ConnectedComponentMap[coord];
+    float4 outputColor;
+
+    if(color.r == _FragmentIndex.r && color.g == _FragmentIndex.g && color.b == 1.0)
+    {
+        outputColor = float4(0.0, 0.0, 0.0, 1.0);
+    }
+    else
+    {
+        outputColor = float4(1.0, 1.0, 1.0, 1.0);
+    }
+
+    _ConnectedComponentFragment[id.xy] = outputColor;
+}
+
+void AddSegment(int2 startCoord, int2 endCoord)
+{
+    int index = 0;
+    InterlockedAdd(_ConnectedSegmentIndex[0], 1, index);
+
+    int4 segment = int4(startCoord.x, startCoord.y, endCoord.x, endCoord.y);
+    _ConnectedSegmentSet[index] = segment;
+}
+
+void HandleSegment(int2 centerIndex, int caseIndex)
+{
+    if(caseIndex == 0)
+    {
+        // ⬚◻⬚
+        // ◻◻◻
+        // ⬚◻⬚
+        return;
+    }
+    if(caseIndex == 1)
+    {
+        // ⬚◻⬚   
+        // ◻◻◼
+        // ⬚◻⬚
+        AddSegment(centerIndex + int2(1, 1), centerIndex + int2(1, 0));
+        return;
+    }
+    if(caseIndex == 2)
+    {
+        // ⬚◻⬚
+        // ◻◻◻
+        // ⬚◼⬚
+        AddSegment(centerIndex + int2(1, 0), centerIndex + int2(0, 0));
+        return;
+    }
+    if(caseIndex == 3)
+    {
+        // ⬚◻⬚
+        // ◻◻◼
+        // ⬚◼⬚
+        AddSegment(centerIndex + int2(1, 1), centerIndex + int2(0, 0));
+        return;
+    }
+    if(caseIndex == 4)
+    {
+        // ⬚◻⬚
+        // ◼◻◻
+        // ⬚◻⬚
+        AddSegment(centerIndex + int2(0, 0), centerIndex + int2(0, 1));
+        return;
+    }
+    if(caseIndex == 5)
+    {
+        // ⬚◻⬚
+        // ◼◻◼
+        // ⬚◻⬚
+        AddSegment(centerIndex + int2(0, 0), centerIndex + int2(0, 1));
+        AddSegment(centerIndex + int2(1, 1), centerIndex + int2(1, 0));
+        return;
+    }
+    if(caseIndex == 6)
+    {
+        // ⬚◻⬚
+        // ◼◻◻
+        // ⬚◼⬚
+        AddSegment(centerIndex + int2(1, 0), centerIndex + int2(0, 1));
+        return;
+    }
+    if(caseIndex == 7)
+    {
+        // ⬚◻⬚
+        // ◼◻◼
+        // ⬚◼⬚
+        AddSegment(centerIndex + int2(1, 1), centerIndex + int2(0, 1));
+        return;
+    }
+    if(caseIndex == 8)
+    {
+        // ⬚◼⬚
+        // ◻◻◻
+        // ⬚◻⬚
+        AddSegment(centerIndex + int2(0, 1), centerIndex + int2(1, 1));
+        return;
+    }
+    if(caseIndex == 9)
+    {
+        // ⬚◼⬚
+        // ◻◻◼
+        // ⬚◻⬚
+        AddSegment(centerIndex + int2(0, 1), centerIndex + int2(1, 0));
+        return;
+    }
+    if(caseIndex == 10)
+    {
+        // ⬚◼⬚
+        // ◻◻◻
+        // ⬚◼⬚
+        AddSegment(centerIndex + int2(0, 1), centerIndex + int2(1, 1));
+        AddSegment(centerIndex + int2(1, 0), centerIndex + int2(0, 0));
+        return;
+    }
+    if(caseIndex == 11)
+    {
+        // ⬚◼⬚
+        // ◻◻◼
+        // ⬚◼⬚
+        AddSegment(centerIndex + int2(0, 1), centerIndex + int2(0, 0));
+        return;
+    }
+    if(caseIndex == 12)
+    {
+        // ⬚◼⬚
+        // ◼◻◻
+        // ⬚◻⬚
+        AddSegment(centerIndex + int2(0, 0), centerIndex + int2(1, 1));
+        return;
+    }
+    if(caseIndex == 13)
+    {
+        // ⬚◼⬚
+        // ◼◻◼
+        // ⬚◻⬚
+        AddSegment(centerIndex + int2(0, 0), centerIndex + int2(1, 0));
+        return;
+    }
+    if(caseIndex == 14)
+    {
+        // ⬚◼⬚
+        // ◼◻◻
+        // ⬚◼⬚
+        AddSegment(centerIndex + int2(1, 0), centerIndex + int2(1, 1));
+        return;
+    }
+    if(caseIndex == 15)
+    {
+        // ⬚◼⬚
+        // ◼◻◼
+        // ⬚◼⬚
+        return;
+    }
+}
+
+[numthreads(8,8,1)]
+void FillSegmentSet(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Width || id.y >= _Height)
+    {
+        return;
+    }
+
+    int centerValue = _ConnectedComponentFragment[id.xy].b > 0.0 ? 1 : 0;
+    if(centerValue == 1)
+    {
+        // 有内容就不处理线框
+        return;
+    }
+
+    int rightValue = id.x < _Width - 1 ? (_ConnectedComponentFragment[id.xy + uint2(1.0, 0.0)].b > 0.0 ? 1 : 0) : 0;
+    int bottomValue = id.y > 0 ? (_ConnectedComponentFragment[id.xy - uint2(0.0, 1.0)].b > 0.0 ? 1 : 0) : 0;
+    int leftValue = id.x > 0 ? (_ConnectedComponentFragment[id.xy - uint2(1.0, 0.0)].b > 0.0 ? 1 : 0) : 0;
+    int topValue = id.y < _Height - 1 ? (_ConnectedComponentFragment[id.xy + uint2(0.0, 1.0)].b > 0.0 ? 1 : 0) : 0;
+
+    int caseIndex = rightValue + (bottomValue << 1) + (leftValue << 2) + (topValue << 3);
+    HandleSegment(int2(id.xy), caseIndex);
+}
