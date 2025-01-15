@@ -1,0 +1,19 @@
+fileFormatVersion: 2
+guid: 53b302e223c89474da2ac65789783ab0
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences:
+  - m_SourceTexture: {instanceID: 0}
+  - m_ConnectedComponentMap: {instanceID: 0}
+  - m_Camera: {instanceID: 0}
+  - m_Mesh: {instanceID: 0}
+  - m_RenderPipelineAsset: {fileID: 11400000, guid: e12d6006b6a3fe0429b85f83349f3792,
+      type: 2}
+  - m_ConnectedComponentMapComputeShader: {fileID: 7200000, guid: ebb860f230a8ae74c94a4bd05c5bdbf8,
+      type: 3}
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 

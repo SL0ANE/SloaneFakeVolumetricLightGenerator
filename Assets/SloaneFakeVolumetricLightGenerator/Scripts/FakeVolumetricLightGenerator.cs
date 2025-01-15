@@ -53,10 +53,12 @@ namespace Sloane.FakeVolumetricLightGenerator
         {
             public BoundsInt BoundingBox;
             public float AreaSize;
+            public Vector2 MassCenter;
             public List<ConnectedSegment> Segments;
         }
         const int BOUNDING_BOX_EXTEND = 8;
-
+        [SerializeField]
+        FakeVolumetricLightClipPlane m_ClipPlane;
         [SerializeField]
         RenderTexture m_SourceTexture;
         [SerializeField]
@@ -586,14 +588,27 @@ namespace Sloane.FakeVolumetricLightGenerator
             {
                 int pointNum = segments.Count;
                 if (pointNum < 3) return 0.0f;
-                float s = segments[0].Start.y * (segments[pointNum - 1].End.x - segments[1].End.x);
-                for (int i = 1; i < pointNum; ++i)
-                    s += segments[i].Start.y * (segments[i - 1].End.x - segments[(i + 1) % pointNum].End.x);
-                
+                float s = 0.0f;
+                for (int i = 0; i < pointNum; ++i)
+                    s += segments[i].Start.x * segments[(i + 1) % pointNum].Start.y - segments[i].Start.y * segments[(i + 1) % pointNum].Start.x;
+
                 return Mathf.Abs(s / 2.0f);
             }
 
-            set.AreaSize = Mathf.Sqrt(ComputePolygonArea(set.Segments)) * Mathf.Min(m_NearPlane.x, m_NearPlane.y) / m_CastResolution;
+            Vector2 ComputeMassCenter(List<ConnectedSegment> segments)
+            {
+                Vector2 massCenter = Vector2.zero;
+                for (int i = 0; i < segments.Count; i++)
+                {
+                    massCenter += segments[i].Start;
+                }
+                massCenter /= segments.Count;
+
+                return massCenter;
+            }
+
+            set.AreaSize = Mathf.Sqrt(ComputePolygonArea(set.Segments) / (m_CastResolution * m_CastResolution));
+            set.MassCenter = ComputeMassCenter(set.Segments) + new Vector2(set.BoundingBox.xMin, set.BoundingBox.yMin);
 
             ListPool<int>.Release(pointIndexsToKeep);
             ListPool<Vector2Int>.Release(points);
@@ -637,6 +652,7 @@ namespace Sloane.FakeVolumetricLightGenerator
             return distance;
         }
 
+        [Obsolete("Not as efficient as GenerateVertexData")]
         void GenerateVertexDataWithComputeShader()
         {
             System.Diagnostics.Stopwatch stopwatch = new System.Diagnostics.Stopwatch();
@@ -732,6 +748,10 @@ namespace Sloane.FakeVolumetricLightGenerator
 
             Vector2Int center = new Vector2Int(SourceWidth / 2, SourceHeight / 2);
             int indexOffset = 0;
+
+            Vector3 clipPlanePoint = m_ClipPlane == null ? Vector3.zero : transform.InverseTransformPoint(m_ClipPlane.transform.position);
+            Vector3 clipPlaneNormal = m_ClipPlane == null ? Vector3.forward : transform.InverseTransformDirection(m_ClipPlane.transform.forward);
+
             for (int i = 0; i < m_OutputConnectedSegmentSets.Count; i++)
             {
                 var connectedSegmentSet = m_OutputConnectedSegmentSets[i];
@@ -766,12 +786,29 @@ namespace Sloane.FakeVolumetricLightGenerator
                     Vector3 nextVertex = new Vector3(segment.End.x + offset.x, segment.End.y + offset.y, 0);
                     Vector3 prevVertex = new Vector3(prevSegment.Start.x + offset.x, prevSegment.Start.y + offset.y, 0);
 
-                    Vector3 normal = ((currVertex - prevVertex) + (nextVertex - currVertex)).normalized;
-                    Vector4 uv0 = new Vector4((float)startCoord.x / SourceWidth, (float)startCoord.y / SourceHeight, 1, 0.5f);
-                    Vector4 uv1 = new Vector4(uv0.x * m_FarPlaneScale, uv0.y * m_FarPlaneScale, m_FarPlaneScale, 0.5f);
+                    Vector3 ProjectToClipPlane(Vector3 point, Vector3 planePoint, Vector3 planeNormal, Vector3 projectionDirection)
+                    {
+                        Vector3 v = point - planePoint;
+                        float d = Vector3.Dot(v, planeNormal) / Vector3.Dot(projectionDirection, planeNormal);
+                        return point - d * projectionDirection;
+                    }
 
-                    m_Vertices.Add(new Vector3(startCoord.x * m_NearPlane.x / SourceWidth, startCoord.y * m_NearPlane.y / SourceHeight, 0));
-                    m_Vertices.Add(new Vector3(startCoord.x * m_FarPlane.x / SourceWidth, startCoord.y * m_FarPlane.y / SourceHeight, m_CastDistance));
+                    Vector3 vert0 = new Vector3(startCoord.x * m_NearPlane.x / SourceWidth, startCoord.y * m_NearPlane.y / SourceHeight, 0);
+                    Vector3 vert1 = new Vector3(startCoord.x * m_FarPlane.x / SourceWidth, startCoord.y * m_FarPlane.y / SourceHeight, m_CastDistance);
+
+                    Vector3 normal = (currVertex - new Vector3(connectedSegmentSet.MassCenter.x - center.x, connectedSegmentSet.MassCenter.y - center.y, 0.0f)).normalized;
+                    Vector4 uv0 = new Vector4((float)startCoord.x / SourceWidth, (float)startCoord.y / SourceHeight, 1, 0.0f);
+                    Vector4 uv1 = new Vector4(uv0.x * m_FarPlaneScale, uv0.y * m_FarPlaneScale, m_FarPlaneScale, 0.0f);
+                    
+                    if (m_ClipPlane != null)
+                    {
+                        Vector3 projectionDirection = (vert1 - vert0).normalized;
+                        vert0 = ProjectToClipPlane(vert0, clipPlanePoint, clipPlaneNormal, projectionDirection);
+                        uv0 *= Mathf.Lerp(1.0f, m_FarPlaneScale, vert0.z / m_CastDistance);
+                    }
+
+                    m_Vertices.Add(vert0);
+                    m_Vertices.Add(vert1);
                     m_Normals.Add(normal);
                     m_Normals.Add(normal);
                     m_UVs.Add(uv0);
@@ -825,7 +862,7 @@ namespace Sloane.FakeVolumetricLightGenerator
 
         void OnDrawGizmos()
         {
-            if (Selection.activeGameObject != gameObject)
+            if (Selection.activeGameObject != gameObject && !(Selection.activeGameObject != null && transform.IsChildOf(Selection.activeGameObject.transform)))
                 return;
 
             // Draw near plane

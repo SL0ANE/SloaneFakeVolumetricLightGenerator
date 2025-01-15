@@ -1,14 +1,25 @@
-Shader "Unlit/FakeVolumetricLight"
+Shader "Sloane/FakeVolumetricLight"
 {
     Properties
     {
         _BaseMap ("Beam Noise Texture", 2D) = "white" {}
+        _DustMap ("Dust Texture", 2D) = "white" {}
         [HDR]_StartColor ("Beam Start Color", Color) = (1,1,1,1)
         [HDR]_EndColor ("Beam End Color", Color) = (1,1,1,1)
-        _NoiseDensity ("Beam Density", Range(0.0, 8.0)) = 1.0
 
         _BeamThreshold ("Beam Threshold", Range(0.0, 1.0)) = 0.0
         _BeamSoftness ("Beam Softness", Range(0.0, 1.0)) = 0.0
+        _BeamSpeed ("Beam Speed", Vector) = (0.618, 1.0, 0, 0)
+
+        [HDR]_DustColor ("Dust Color", Color) = (1,1,1,1)
+        _DustThreshold ("Dust Threshold", Range(0.0, 1.0)) = 0.0
+        _DustSoftness ("Dust Softness", Range(0.0, 1.0)) = 0.0
+        _DustSpeed ("Dust Speed", Vector) = (0.618, -1, 0, 0)
+
+        _BeamDensity ("Beam Density", Range(0.0, 8.0)) = 1.0
+        _DustDensity ("Dust Density", Range(0.0, 8.0)) = 1.0
+
+        _ViewDirContribution ("View Direction Contribution", Range(0.0, 1.0)) = 0.8
     }
     SubShader
     {
